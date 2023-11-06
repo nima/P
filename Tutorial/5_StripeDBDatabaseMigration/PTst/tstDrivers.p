@@ -5,11 +5,12 @@ machine tdStripDBInterrogator {
   var c : Client;
   var req : tClientReq;
   var storage : map[tDatabaseStripe, map[int,int]];
+  var migrationPhases : seq[tMigrationPhaseFleetSet];
 
   start state Init {
     entry {
-      storage[StripeJ] = initializeStorage(5);
-      storage[StripeD] = initializeStorage(0);
+      initializeStorage(StripeJ, 5);
+      initializeStorage(StripeD, 0);
 
       f = new Fleet((
         jDB=new Database((stripe=StripeJ, ident="JournalDB", storage=storage[StripeJ])),
@@ -17,35 +18,77 @@ machine tdStripDBInterrogator {
       ));
       c = new Client((fleet=f, ));
 
-      send c, eInvokeProcedure, updateLocalWithRandomKey(StripeJ, 200);
+      initializeMigrationPhases();
+      send f, eFleetPhaseChange, migrationPhases[0];
+      migrationPhases -= (0);
 
-      announce eSpecStart, storage;
+      goto startMigration;
     }
+  }
+
+  state startMigration {
+    entry {
+      generateRandomRequestThenUpdateLocalStorageThenRequestToProxy();
+    }
+
+    on eClientRes do (res: tDatabaseRes) {
+      print format("{0}", res);
+    }
+  }
+  
+  fun initializeStorage(stripe: tDatabaseStripe, count: int) {
+    var store: map[int, int];
+    storage[stripe] = store;
+    while(count > 0) {
+      storage[stripe][100 + choose(100)] = 1 + choose(20);
+      count = count - 1;
+    }
+  }
+
+  fun initializeMigrationPhases() {
+    var nextPhaseSet: set[tFleetPhaseId];
+
+    nextPhaseSet += (B0); migrationPhases += (sizeof(migrationPhases), nextPhaseSet); // [B0]
+    nextPhaseSet += (B1); migrationPhases += (sizeof(migrationPhases), nextPhaseSet); // [B0, B1]
+    nextPhaseSet -= (B0); migrationPhases += (sizeof(migrationPhases), nextPhaseSet); //     [B1]
+    nextPhaseSet += (B2); migrationPhases += (sizeof(migrationPhases), nextPhaseSet); //     [B1, B2]
+    nextPhaseSet -= (B1); migrationPhases += (sizeof(migrationPhases), nextPhaseSet); //         [B2]
+    nextPhaseSet += (B3); migrationPhases += (sizeof(migrationPhases), nextPhaseSet); //         [B2, B3]
+    nextPhaseSet -= (B2); migrationPhases += (sizeof(migrationPhases), nextPhaseSet); //             [B3]
   }
 
   // update a single key in storage (i.e., increment revesion), and return the key
-  fun updateLocalWithRandomKey(dbid: tDatabaseStripe, hRange: int) : int {
-    // TODO: this has to know if the operation is a CREAT or whatever, it can't just update the storage blindly
+  fun generateRandomRequestThenUpdateLocalStorageThenRequestToProxy() {
     var key : int;
     var rev : int;
+    var req : tClientReq;
 
-    key = hRange + choose(100);
-    if (key in storage[dbid]) rev = storage[dbid][key];
-    else rev = 99999;
-
-    storage[dbid][key] = rev + 1;
-
-    return key;
-  }
-
-  fun initializeStorage(count: int) : map[int, int] {
-    var store : map[int, int];
-
-    while(count > 0) {
-      store[100 + choose(100)] = 1 + choose(20);
-      count = count - 1;
+    key = 500 + choose(100);
+    if (key in storage[StripeJ]) {
+      // TODO: UPDATE, DELETE, or READ
+      rev = storage[StripeJ][key];
+    } else {
+      // CREATE
+      storage[StripeJ][key] = 1;
+      req = mkCreateRequest(this, key);
     }
 
-    return store;
+    announce eSpecStripeDBListenForAnnouncement, storage;
+    assert sizeof(req.requesters) == 1 && req.requesters[0] == this, format(
+      "Expected a single requester ({0}) in requesters, received instead: {1}", this, req.requesters
+    );
+    send c, eClientReq, req;
+  }
+
+  fun mkCreateRequest(requester: machine, key: int) : tClientReq {
+    var req : tClientReq;
+
+    req.op = CREATE;
+    req.requesters += (0, requester);
+    assert sizeof(req.requesters) == 1, format("{0}", req.requesters); // [this, testSuite]
+    req.key = key;
+
+    assert req.override == StripeDB, format("CREATE operation expects <StripeDB:{0}>, but found <?:{1}>", StripeDB, req.override);
+    return req;
   }
 }

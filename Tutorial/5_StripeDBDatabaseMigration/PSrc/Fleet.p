@@ -3,16 +3,14 @@
 event eCriticalFault : (int, string);
 event eNotImplemented : int;
 
-enum tApolloDeploymentState { COMPLETE, IN_PROGRESS }
-event eApolloDeployment : tApolloDeploymentState;
-
 enum tFleetPhaseId { B0 = 0, B1 = 1, B2 = 2, B3 = 3 }
-
 type tFleetDatabaseConfig = (C: bool, R: bool, U: bool, D: bool);
 type tFleetPhaseSet = (JournalDB: tFleetDatabaseConfig, DynamoDB: tFleetDatabaseConfig);
+type tMigrationPhaseFleetSet = set[tFleetPhaseId];
+
+event eFleetPhaseChange : tMigrationPhaseFleetSet;
 
 machine Fleet {
-  var PHASES : map[tFleetPhaseId, tFleetPhaseSet];
   var fleetSet : set[tFleetPhaseId];
 
   // The feature flags on any given "fleet" determins the abstract notion of
@@ -22,35 +20,29 @@ machine Fleet {
 
   start state Init {
     entry (argv: (jDB: Database, dDB: Database)) {
-      PHASES = mkFleetPhaseSets();
-      fleetSet += (B0);
-
       journalDB = argv.jDB;
       dynamoDB = argv.dDB;
 
+      goto BlockOnFirstDeployment;
+    }
+  }
+
+  state BlockOnFirstDeployment {
+    on eFleetPhaseChange do (fs: tMigrationPhaseFleetSet) {
+      fleetSet = fs;
       goto Serve;
     }
   }
 
   state Serve {
-    on eApolloDeployment do (msg: tApolloDeploymentState) {
-      if (msg == IN_PROGRESS) {
-        fleetSet += (B1);
-        send this, eApolloDeployment, COMPLETE;
-      } else if (msg == COMPLETE) {
-        fleetSet -= (B0);
-        send this, eApolloDeployment, IN_PROGRESS;
-      }
+    on eFleetPhaseChange do (fs: tMigrationPhaseFleetSet) {
+      fleetSet = fs;
     }
 
     // 110s
-    on eClientReq do (cliReq: tClientReq) {
-      handleRequest(mkDatabaseRequest(cliReq));
-    }
-
     on eDatabaseReq do (req: tDatabaseReq) {
-      req.requester += (0, this);
-      assert sizeof(req.requester) == 2 && req.requester[0] == this;
+      req.requesters += (0, this);
+      assert sizeof(req.requesters) == 3 && req.requesters[0] == this, format("Expected X but got {0}", req.requesters); // [this, client, testSuite]
 
       if (req.op == CREATE) {
         if (req.cfg.JournalDB.C) {
@@ -72,15 +64,15 @@ machine Fleet {
     // 100s
     on eDatabaseRes do (res: tDatabaseRes) {
       assert (
-        sizeof(res.req.requester) == 1 && res.req.requester[0] != this
+        sizeof(res.req.requesters) == 2 && res.req.requesters[0] != this
       ), format(
-        "Expected 1 entry, and it to not be {0}, but found {1}", this, res.req.requester
-      );
+        "Expected 2 entries, and the first to not be {0}, but found {1}", this, res.req.requesters
+      ); // [c, td]
 
       if (res.code == NOTFOUND) {
         if (res.req.op == READ) {
           // Stripe search; bounce back to the database layer, this time, the alternate stripe
-          res.req.requester += (0, this);
+          res.req.requesters += (0, this);
           if (res.req.cfg.JournalDB.R) {
             send dynamoDB, eDatabaseReq, res.req;
           } else if (res.req.cfg.DynamoDB.R) {
@@ -91,14 +83,14 @@ machine Fleet {
         }
       } else if (res.code == SUCCESS) {
         assert (
-          sizeof(res.req.requester) == 1 && res.req.requester[0] != this
+          sizeof(res.req.requesters) == 2 && res.req.requesters[0] != this
         ), format(
-          "Expected 1 entry, and it to not be {0}, but found {1}", this, res.req.requester
-        );
-        send res.req.requester[0], eClientRes, res;
+          "Expected 2 entries, and the first to not be {0}, but instead found {1}", this, res.req.requesters
+        ); // [c, td]
+        send res.req.requesters[0], eDatabaseRes, res;
       } else if (res.code == ERROR) {
         // errors are normal DB functions, will not raise anything here.
-        send res.req.requester[0], eClientRes, res;
+        send res.req.requesters[0], eDatabaseRes, res;
       }
     }
   }
@@ -109,7 +101,7 @@ machine Fleet {
     } else {
       assert req.override == StripeDB, format("Expected {0}, but found {1}", StripeDB, req.override);
     }
-    assert sizeof(req.requester) == 2 && req.requester[0] == this;
+    assert sizeof(req.requesters) == 2 && req.requesters[0] == this, format("Expected a size 2 array, the first of which to be <this:{0}>, but found instead: {1}", this, req.requesters);
 
     if (req.op == SCAN) {
       if (req.override == JournalDB) {
@@ -139,34 +131,9 @@ machine Fleet {
       raise eCriticalFault, (119, "Bad UNKNOWN request");
     }
   }
-
-
-  fun mkDatabaseRequest(cliReq: tClientReq) : tDatabaseReq {
-    var dbReq : tDatabaseReq;
-
-    dbReq.requester += (0, cliReq.requester);
-    dbReq.requester += (0, this);
-    dbReq.key = cliReq.key;
-    dbReq.op = cliReq.op;
-    dbReq.override = cliReq.override;
-    dbReq.cfg = PHASES[choose(fleetSet)];
-
-    return dbReq;
-  }
 }
 
-fun mkFleetPhaseSets() : map[tFleetPhaseId, tFleetPhaseSet] {
-  var phases : map[tFleetPhaseId, tFleetPhaseSet];
-
-  phases[B0] = mkFleetPhaseSet(1, 1, 1, 1, 0, 0, 0, 0); // JournalDB:[CRUD], DynamoDB:[----]
-  phases[B1] = mkFleetPhaseSet(1, 0, 1, 1, 0, 1, 0, 0); // JournalDB:[CrUD], DynamoDB:[-Rud]
-  phases[B2] = mkFleetPhaseSet(0, 0, 1, 1, 1, 1, 0, 0); // JournalDB:[-rUD], DynamoDB:[CRud]
-  phases[B3] = mkFleetPhaseSet(0, 0, 0, 0, 1, 1, 1, 1); // JournalDB:[----], DynamoDB:[CRUD]
-
-  return phases;
-}
-
-fun mkFleetPhaseSet(jC: int, jR: int, jU: int, jD: int, dC: int, dR: int, dU: int, dD: int) : tFleetPhaseSet {
+fun MkFleetPhaseSet(jC: int, jR: int, jU: int, jD: int, dC: int, dR: int, dU: int, dD: int) : tFleetPhaseSet {
   var phase : tFleetPhaseSet;
 
   phase.JournalDB.C  = jC == 1;
