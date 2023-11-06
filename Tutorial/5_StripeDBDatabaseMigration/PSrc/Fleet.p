@@ -12,6 +12,7 @@ event eFleetPhaseChange : tMigrationPhaseFleetSet;
 
 machine Fleet {
   var fleetSet : set[tFleetPhaseId];
+  var phases : map[tFleetPhaseId, tFleetPhaseSet];
 
   // The feature flags on any given "fleet" determins the abstract notion of
   // the "stripe database", therefore we code that up in this state machine.
@@ -22,6 +23,8 @@ machine Fleet {
     entry (argv: (jDB: Database, dDB: Database)) {
       journalDB = argv.jDB;
       dynamoDB = argv.dDB;
+
+      initializeFleetPhaseSets();
 
       goto BlockOnFirstDeployment;
     }
@@ -45,15 +48,15 @@ machine Fleet {
       assert sizeof(req.requesters) == 3 && req.requesters[0] == this, format("Expected X but got {0}", req.requesters); // [this, client, testSuite]
 
       if (req.op == CREATE) {
-        if (req.cfg.JournalDB.C) {
+        if (whoami().JournalDB.C) {
           send journalDB, eDatabaseReq, req;
-        } else if (req.cfg.DynamoDB.C) {
+        } else if (whoami().DynamoDB.C) {
           send dynamoDB, eDatabaseReq, req;
         }
       } else if (req.op == READ) {
-        if (req.cfg.JournalDB.C) {
+        if (whoami().JournalDB.C) {
           send journalDB, eDatabaseReq, req;
-        } else if (req.cfg.DynamoDB.C) {
+        } else if (whoami().DynamoDB.C) {
           send dynamoDB, eDatabaseReq, req;
         }
       } else {
@@ -73,9 +76,9 @@ machine Fleet {
         if (res.req.op == READ) {
           // Stripe search; bounce back to the database layer, this time, the alternate stripe
           res.req.requesters += (0, this);
-          if (res.req.cfg.JournalDB.R) {
+          if (whoami().JournalDB.R) {
             send dynamoDB, eDatabaseReq, res.req;
-          } else if (res.req.cfg.DynamoDB.R) {
+          } else if (whoami().DynamoDB.R) {
             send journalDB, eDatabaseReq, res.req;
           }
         } else {
@@ -112,17 +115,17 @@ machine Fleet {
         raise eCriticalFault, (111, "Bad SCAN request");
       }
     } else if (req.op == CREATE) {
-      if (req.cfg.JournalDB.C) {
+      if (whoami().JournalDB.C) {
         send journalDB, eDatabaseReq, req;
-      } else if (req.cfg.DynamoDB.C) {
+      } else if (whoami().DynamoDB.C) {
         send dynamoDB, eDatabaseReq, req;
       } else {
         raise eCriticalFault, (112, "Bad CREATE request");
       }
     } else if (req.op == READ) {
-      if (req.cfg.JournalDB.C) {
+      if (whoami().JournalDB.C) {
         send journalDB, eDatabaseReq, req;
-      } else if (req.cfg.DynamoDB.C) {
+      } else if (whoami().DynamoDB.C) {
         send dynamoDB, eDatabaseReq, req;
       } else {
         raise eCriticalFault, (113, "Bad READ request");
@@ -131,20 +134,35 @@ machine Fleet {
       raise eCriticalFault, (119, "Bad UNKNOWN request");
     }
   }
-}
 
-fun MkFleetPhaseSet(jC: int, jR: int, jU: int, jD: int, dC: int, dR: int, dU: int, dD: int) : tFleetPhaseSet {
-  var phase : tFleetPhaseSet;
+  fun whoami() : tFleetPhaseSet {
+    // A fleet is at any point in time, consists of either one (homogenous fleet)
+    // or at most two (deployment in flight, heterogenous fleet).  Since no one
+    // gets to decide which of the available phases gets picked, we randomly
+    // pick one.
+    return phases[choose(keys(phases))];
+  }
 
-  phase.JournalDB.C  = jC == 1;
-  phase.JournalDB.R  = jR == 1;
-  phase.JournalDB.U  = jU == 1;
-  phase.JournalDB.D  = jD == 1;
+  fun initializeFleetPhaseSets() {
+    phases[B0] = mkFleetPhaseSet(1, 1, 1, 1, 0, 0, 0, 0); // JournalDB:[CRUD], DynamoDB:[----]
+    phases[B1] = mkFleetPhaseSet(1, 0, 1, 1, 0, 1, 0, 0); // JournalDB:[CrUD], DynamoDB:[-Rud]
+    phases[B2] = mkFleetPhaseSet(0, 0, 1, 1, 1, 1, 0, 0); // JournalDB:[-rUD], DynamoDB:[CRud]
+    phases[B3] = mkFleetPhaseSet(0, 0, 0, 0, 1, 1, 1, 1); // JournalDB:[----], DynamoDB:[CRUD]
+  }
 
-  phase.DynamoDB.C = dC == 1;
-  phase.DynamoDB.R = dR == 1;
-  phase.DynamoDB.U = dU == 1;
-  phase.DynamoDB.D = dD == 1;
+  fun mkFleetPhaseSet(jC: int, jR: int, jU: int, jD: int, dC: int, dR: int, dU: int, dD: int) : tFleetPhaseSet {
+    var phase : tFleetPhaseSet;
 
-  return phase;
+    phase.JournalDB.C  = jC == 1;
+    phase.JournalDB.R  = jR == 1;
+    phase.JournalDB.U  = jU == 1;
+    phase.JournalDB.D  = jD == 1;
+
+    phase.DynamoDB.C = dC == 1;
+    phase.DynamoDB.R = dR == 1;
+    phase.DynamoDB.U = dU == 1;
+    phase.DynamoDB.D = dD == 1;
+
+    return phase;
+  }
 }

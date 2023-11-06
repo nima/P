@@ -8,7 +8,7 @@ enum tDatabaseStripe { StripeJ, StripeD }
 enum tDatabaseReqCode { SCAN = 16, CREATE = 8, READ = 4, UPDATE = 2, DELETE = 1 }
 enum tDatabaseResCode { SUCCESS = 200, NOTFOUND = 404, ERROR = 500 }
 enum tDatabaseSelectOverride { StripeDB = 0, JournalDB = 1, DynamoDB = 2 }
-type tDatabaseReq = (requesters: seq[machine], cfg: tFleetPhaseSet, key: int, op: tDatabaseReqCode, override: tDatabaseSelectOverride);
+type tDatabaseReq = (requesters: seq[machine], key: int, op: tDatabaseReqCode, override: tDatabaseSelectOverride);
 type tDatabaseRes = (db: Database, req: tDatabaseReq, payload: data, rev: int, code: tDatabaseResCode);
 
 event eDatabaseReq : tDatabaseReq;

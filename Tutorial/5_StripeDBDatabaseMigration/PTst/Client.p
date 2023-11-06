@@ -51,7 +51,6 @@ sends eDatabaseReq, eClientRes;
 
   fun mkDatabaseRequest(cliReq: tClientReq) : tDatabaseReq {
     var dbReq : tDatabaseReq;
-    var phases : map[tFleetPhaseId, tFleetPhaseSet];
 
     dbReq.requesters = cliReq.requesters;
     dbReq.requesters += (0, this);
@@ -60,20 +59,6 @@ sends eDatabaseReq, eClientRes;
     dbReq.op = cliReq.op;
     dbReq.override = cliReq.override;
 
-    phases = MkFleetPhaseSets();
-    dbReq.cfg = phases[B0]; // FIXME: hardcoded
-
     return dbReq;
-  }
-
-  fun MkFleetPhaseSets() : map[tFleetPhaseId, tFleetPhaseSet] {
-    var phases : map[tFleetPhaseId, tFleetPhaseSet];
-
-    phases[B0] = MkFleetPhaseSet(1, 1, 1, 1, 0, 0, 0, 0); // JournalDB:[CRUD], DynamoDB:[----]
-    phases[B1] = MkFleetPhaseSet(1, 0, 1, 1, 0, 1, 0, 0); // JournalDB:[CrUD], DynamoDB:[-Rud]
-    phases[B2] = MkFleetPhaseSet(0, 0, 1, 1, 1, 1, 0, 0); // JournalDB:[-rUD], DynamoDB:[CRud]
-    phases[B3] = MkFleetPhaseSet(0, 0, 0, 0, 1, 1, 1, 1); // JournalDB:[----], DynamoDB:[CRUD]
-
-    return phases;
   }
 }
